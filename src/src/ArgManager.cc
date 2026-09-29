@@ -3,9 +3,11 @@
 
 #include "srsran/srsran.h"
 #include "include/Settings.h"
+#include <getopt.h>
 #include <iostream>
 #include <unistd.h>
 #include <cstdio>
+#include <cstring>
 
 #define ENABLE_AGC_DEFAULT
 
@@ -61,6 +63,7 @@ void ArgManager::defaultArgs(Args& args) {
   args.target_rnti = 0;
   args.en_debug = false;
   args.api_mode = -1; //api functions, 0: identity mapping, 1: UECapa, 2: IMSI, 3: all functions
+  args.cells.clear(); // Step 3: empty by default -> legacy single-cell path
 }
 
 void ArgManager::usage(Args& args, const std::string& prog) {
@@ -102,12 +105,24 @@ void ArgManager::usage(Args& args, const std::string& prog) {
   printf("\t-m Sniffer mode, 0 for downlink sniffing mode, 1 for uplink sniffing mode\n");
   printf("\t-z API mode, 0 for identity mapping, 1 for IMSI collecting, 2 for UECapability profiling, 3 for all\n");
   printf("\t-d Enable debug mode, print debug message to screen (Defautl disable)\n");
+  printf("\t   --cells \"PCI1:PRB1,PCI2:PRB2,...\"  Multi-cell list (Step 3).\n");
+  printf("\t                                    All cells share -f (EARFCN); may differ in PRB.\n");
+  printf("\t                                    Empty => legacy single-cell path.\n");
 }
 
 void ArgManager::parseArgs(Args& args, int argc, char **argv) {
   int opt;
   defaultArgs(args);
-  while ((opt = getopt(argc, argv, "aAcCDdEfghHilLnpPrRsStTvwWyYqFIuUmOoz")) != -1) {
+
+  // Step 3: long-option support for --cells.
+  static struct option long_opts[] = {
+    {"cells", required_argument, nullptr, 1000},
+    {nullptr, 0, nullptr, 0}
+  };
+  int long_index = 0;
+
+  while ((opt = getopt_long(argc, argv, "aAcCDdEfghHilLnpPrRsStTvwWyYqFIuUmOoz",
+                            long_opts, &long_index)) != -1) {
     switch (opt) {
       case 'a':
         args.rf_args = argv[optind];
@@ -208,15 +223,41 @@ void ArgManager::parseArgs(Args& args, int argc, char **argv) {
       case 'F':
         args.pcap_file = argv[optind];
         break;
-      // case 'h':
-      //   args.harq_mode = static_cast<uint32_t>(strtoul(argv[optind], nullptr, 0));
-      //   break;
       case 'q':
         args.mcs_tracking_mode = static_cast<uint32_t>(strtoul(argv[optind], nullptr, 0));
         break;
       case 'z':
         args.api_mode = static_cast<uint32_t>(strtoul(argv[optind], nullptr, 0));
         break;
+      case 1000: {
+        // --cells "PCI1:PRB1,PCI2:PRB2,..."
+        const char* s = optarg;
+        while (*s) {
+          char* endptr = nullptr;
+          unsigned long pci = strtoul(s, &endptr, 0);
+          if (endptr == s || *endptr != ':') {
+            fprintf(stderr, "Bad --cells format near '%s' (expect PCI:PRB)\n", s);
+            exit(-1);
+          }
+          s = endptr + 1;
+          unsigned long prb = strtoul(s, &endptr, 0);
+          if (endptr == s) {
+            fprintf(stderr, "Bad --cells PRB near '%s'\n", s);
+            exit(-1);
+          }
+          CellCfg c{static_cast<uint32_t>(pci), static_cast<uint32_t>(prb)};
+          args.cells.push_back(c);
+          if (*endptr == ',') {
+            s = endptr + 1;
+          } else if (*endptr == '\0') {
+            break;
+          } else {
+            fprintf(stderr, "Bad --cells separator near '%s'\n", endptr);
+            exit(-1);
+          }
+        }
+        break;
+      }
       case 'h':
       default:
         usage(args, argv[0]);
@@ -224,7 +265,7 @@ void ArgManager::parseArgs(Args& args, int argc, char **argv) {
     }
   }
 
-  if (args.rf_freq < 0 && args.input_file_name == "") {
+  if (args.rf_freq < 0 && args.input_file_name == "" && args.cells.empty()) {
     usage(args, argv[0]);
     exit(-1);
   }

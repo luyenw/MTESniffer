@@ -2,7 +2,17 @@
 
 #include <stdint.h>
 #include <string>
+#include <vector>
 #include "Sniffer_dependency.h"
+
+/*
+ * Step 3 (multi-cell refactor): one entry per cell to be sniffed.
+ * All cells share the same EARFCN (-f) but may have different PCI/PRB.
+ */
+struct CellCfg {
+  uint32_t pci;     // Physical Cell ID (0..503)
+  uint32_t nof_prb; // 6, 15, 25, 50, 75, 100
+};
 
 struct Args {
   // No pointer members! Avoid shallow copies
@@ -52,6 +62,9 @@ struct Args {
   bool        cell_search = false;
   uint16_t    target_rnti = 0;
   int         api_mode    = -1; //api functions, 0: identity mapping, 1: UECapa, 2: IMSI
+
+  // Step 3: multi-cell list. Empty => legacy single-cell path.
+  std::vector<CellCfg> cells;
 };
 
 class ArgManager {

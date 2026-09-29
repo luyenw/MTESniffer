@@ -1,5 +1,13 @@
 #include "include/MCSTracking.h"
 
+// Multi-cell: each CellPipeline prints its own per-RNTI table from its
+// own thread. Without a shared mutex the tables interleave on stdout.
+// g_print_mutex serialises whole-table prints across all pipelines.
+// Lock order: g_print_mutex (outer) -> tracking_mutex (inner, per-instance).
+// No deadlock because g_print_mutex is always acquired first and only
+// held for the duration of one print call.
+static std::mutex g_print_mutex;
+
 MCSTracking::MCSTracking(int tracking_mode,
                          uint16_t target_rnti,
                          bool en_debug,
@@ -297,6 +305,7 @@ void print_header_ul_mode()
 
 void MCSTracking::print_database_ul()
 {
+    std::lock_guard<std::mutex> printlock(g_print_mutex);
     std::unique_lock<std::mutex> trackinglock(tracking_mutex);
     std::map<uint16_t, ul_sniffer_tracking_t>::iterator iter;
     int nof_16qam = 0;
@@ -304,6 +313,8 @@ void MCSTracking::print_database_ul()
     int nof_256qam = 0;
     int nof_unknown = 0;
     int num = 1;
+
+    std::cout << "===== Cell PCI=" << pci << " (UL) =====" << std::endl;
 
     for (int i = 0; i < 86; i++)
     {
@@ -392,6 +403,7 @@ void MCSTracking::print_database_ul()
 
 void MCSTracking::print_all_database_ul()
 {
+    std::lock_guard<std::mutex> printlock(g_print_mutex);
     std::unique_lock<std::mutex> trackinglock(tracking_mutex);
     std::map<uint16_t, ul_sniffer_tracking_t>::iterator iter;
     int nof_16qam = 0;
@@ -399,6 +411,8 @@ void MCSTracking::print_all_database_ul()
     int nof_256qam = 0;
     int nof_unknown = 0;
     int num = 1;
+
+    std::cout << "===== Cell PCI=" << pci << " (UL all) =====" << std::endl;
 
     for (int i = 0; i < 86; i++)
     {
@@ -998,12 +1012,15 @@ void print_header()
 
 void MCSTracking::print_database_dl()
 {
+    std::lock_guard<std::mutex> printlock(g_print_mutex);
     std::unique_lock<std::mutex> trackinglock(tracking_mutex);
     std::map<uint16_t, dl_sniffer_mcs_tracking_t>::iterator iter;
     int nof_64qam = 0;
     int nof_256qam = 0;
     int nof_unknown = 0;
     int num = 1;
+
+    std::cout << "===== Cell PCI=" << pci << " (DL) =====" << std::endl;
 
     for (int i = 0; i < 104; i++)
     {
@@ -1083,12 +1100,15 @@ void MCSTracking::print_database_dl()
 
 void MCSTracking::print_all_database_dl()
 {
+    std::lock_guard<std::mutex> printlock(g_print_mutex);
     std::unique_lock<std::mutex> trackinglock(tracking_mutex);
     std::map<uint16_t, dl_sniffer_mcs_tracking_t>::iterator iter;
     int nof_64qam = 0;
     int nof_256qam = 0;
     int nof_unknown = 0;
     int num = 1;
+
+    std::cout << "===== Cell PCI=" << pci << " (DL all) =====" << std::endl;
 
     for (int i = 0; i < 109; i++)
     {

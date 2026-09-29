@@ -151,6 +151,14 @@ public:
     std::atomic<float>& get_est_cfo(){return est_cfo;}
     clock_t     last_check;
 
+    // PCI of the cell this MCSTracking belongs to. Set once at pipeline
+    // init (after setCell). Used only for display labels in the per-RNTI
+    // tables so multi-cell output is unambiguous. RNTI is only unique
+    // within a cell, so the PCI label is the only way to tell which
+    // cell a row belongs to when several pipelines print concurrently.
+    void        setPCI(uint32_t p) { pci = p; }
+    uint32_t    getPCI() const { return pci; }
+
 private:
     int         sniffer_mode    = DL_MODE;
     int         harq_mode       = 0;
@@ -171,6 +179,7 @@ private:
     std::map<uint16_t, ul_sniffer_tracking_t>     all_database_ul_mode;
     std::map<uint16_t, dl_sniffer_mcs_tracking_t> tracking_database_dl_mode;
     std::map<uint16_t, dl_sniffer_mcs_tracking_t> all_database_dl_mode;
+    uint32_t    pci = 0;
     /*Statistic file*/
     std::ofstream   csv_file;
     std::string     file_name = "mcs_statistic.csv";
