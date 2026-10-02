@@ -86,6 +86,12 @@ public:
   void startAgc(double min_rx_gain, double max_rx_gain, double init_agc);
 
   /*
+   * Initial CFO (Hz) measured by the orchestrator's cell search, applied
+   * by run() so ue_sync starts already corrected. Call before run().
+   */
+  void setInitialCfo(float cfo_hz) { initial_cfo_hz_ = cfo_hz; has_initial_cfo_ = true; }
+
+  /*
    * Run the main decode loop. Blocks until stop() is called or
    * args.nof_subframes is reached. Returns true on clean exit.
    */
@@ -128,12 +134,17 @@ private:
   std::atomic<float>      est_cfo_;
 
   // ---- mode flags ----
+  float initial_cfo_hz_ = 0.0f;
+  bool  has_initial_cfo_ = false;  // true once setInitialCfo() was called
+  static constexpr float kMaxCfoDevHz = 1000.0f;  // max tracked CFO deviation from initial
+  bool  plmn_checked_ = false;  // MCC/MNC filter already evaluated
   int mcs_tracking_mode_;
   int harq_mode_;
 
   // ---- helpers ----
   void initUeSyncRf();
   void initUeSyncFile();
+  srsran_cell_t mibCell() const;
   void initUeMib(cf_t* buffer);
   void configureCfo(float search_cell_cfo);
   void configurePdsch();

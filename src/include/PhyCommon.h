@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <atomic>
 #include "falcon/util/RNTIManager.h"
 #include "falcon/phy/falcon_phch/falcon_dci.h"
 #include "SubframeInfoConsumer.h"
@@ -59,9 +60,26 @@ public:
   //lower layer interface
   void consumeDCICollection(const SubframeInfo& subframeInfo);
 
+  // SIB1 PLMN, reported by any worker, read by CellPipeline (MCC/MNC filter).
+  void reportSib1Plmn(uint16_t mcc, uint16_t mnc) {
+    if (sib1_ready.load(std::memory_order_acquire)) return;
+    sib1_plmn.store((static_cast<uint32_t>(mcc) << 16) | mnc, std::memory_order_relaxed);
+    sib1_ready.store(true, std::memory_order_release);
+  }
+  bool getSib1Plmn(uint16_t& mcc, uint16_t& mnc) const {
+    if (!sib1_ready.load(std::memory_order_acquire)) return false;
+    const uint32_t v = sib1_plmn.load(std::memory_order_relaxed);
+    mcc = static_cast<uint16_t>(v >> 16);
+    mnc = static_cast<uint16_t>(v & 0xFFFF);
+    return true;
+  }
+
   uint32_t max_prb;
   uint32_t nof_rx_antennas;
 private:
+  std::atomic<bool>     sib1_ready{false};
+  std::atomic<uint32_t> sib1_plmn{0};
+
   FILE* dci_file;
   FILE* stats_file;
   RNTIManager rntiManager;

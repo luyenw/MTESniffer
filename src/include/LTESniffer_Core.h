@@ -76,6 +76,14 @@ private:
   // cells), and one CellPipeline per cell, each on its own thread.
   bool runMultiCell();
 
+  // Legacy multi-cell path (Step 3, 2-field --cells form: PCI:PRB).
+  // All cells share the global -f frequency. No Feasibility check.
+  bool runMultiCellLegacy();
+
+  // New multi-cell path (Step 3b, 3-field --cells form: EARFCN:PCI:PRB).
+  // Each cell may have its own EARFCN. Runs Feasibility + DdcChannel.
+  bool runMultiCellNew();
+
   Args                    args;
   int                     nof_workers;
   int                     sniffer_mode;     //-m
