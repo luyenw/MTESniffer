@@ -33,6 +33,7 @@
 #endif
 
 #define DL_SNIFFER_SIB2_SUCCESS 3
+#define DL_SNIFFER_SIB1_MISMATCH 4  // SIB1 decoded but MCC/MNC doesn't match filter
 #define UL_SNIFFER_FOUND_CON_SET 4
 
 /*include for decode SIB2*/
@@ -105,7 +106,9 @@ public:
                            srsran_ue_dl_cfg_t *ue_dl_cfg,
                            std::vector<DL_Sniffer_DCI_DL> *ran_dl_collection,
                            uint32_t sfn,
-                           uint32_t sf_idx);
+                           uint32_t sf_idx,
+                           uint16_t filter_mcc = 0,
+                           uint16_t filter_mnc = 0);
     void unpack_pdsch_message(uint8_t* sdu_ptr, int length);
     int  decode_rrc_connection_setup(uint8_t* sdu_ptr, int length, ltesniffer_ue_spec_config_t *ue_config);
     int  decode_rrc_connection_reconfig(uint8_t *sdu_ptr, int length, DL_Sniffer_PDU_info_t &pdu_info, int tti_tx_dl);                    
@@ -128,6 +131,7 @@ public:
                     std::string rnti_name,
                     uint32_t tti);
     int decode_SIB();
+    void parse_sib1_plmn(const asn1::rrc::sib_type1_s &sib1);
     int decode_dl_mode();
 
     int decode_mac_ce(uint32_t rnti);
@@ -135,6 +139,13 @@ public:
     int decode_ul_mode(uint32_t rnti, std::vector<DL_Sniffer_rar_result> *rar_result);
     
     asn1::rrc::sib_type2_s* getSIB2(){ return &sib2; }
+
+    // Getter for SIB1 MCC/MNC. Returns true if SIB1 has been decoded.
+    bool   getSib1MccMnc(uint16_t& mcc_out, uint16_t& mnc_out) const {
+      mcc_out = sib1_mcc;
+      mnc_out = sib1_mnc;
+      return sib1_decoded;
+    }
 
     void write_pcap(std::string RNTI_name, uint8_t *pdu, uint32_t pdu_len_bytes, uint16_t crnti, uint32_t tti, bool retx);
 
@@ -212,6 +223,16 @@ private:
 
     /*SIB2 for uplink config*/
     asn1::rrc::sib_type2_s sib2;
+
+    /*SIB1 MCC/MNC (extracted from first PLMN in plmn_id_list).
+       0 = not yet decoded. Used by CellPipeline for MCC/MNC filtering.*/
+    uint16_t sib1_mcc = 0;
+    uint16_t sib1_mnc = 0;
+    bool     sib1_decoded = false;
+
+    /*MCC/MNC filter (0 = no filter for that field).*/
+    uint16_t filter_mcc_ = 0;
+    uint16_t filter_mnc_ = 0;
 
     /*Conver grant in rar*/
     srsran_pusch_hopping_cfg_t      hopping_cfg = {};

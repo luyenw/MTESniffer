@@ -64,6 +64,12 @@ void ArgManager::defaultArgs(Args& args) {
   args.en_debug = false;
   args.api_mode = -1; //api functions, 0: identity mapping, 1: UECapa, 2: IMSI, 3: all functions
   args.cells.clear(); // Step 3: empty by default -> legacy single-cell path
+  // Step 3b (case 3b): pre-flight / multi-EARFCN defaults.
+  args.force    = false;
+  args.guard_hz = 200e3;
+  args.cells_have_dl_earfcn = false;
+  args.filter_mcc = 0;
+  args.filter_mnc = 0;
 }
 
 void ArgManager::usage(Args& args, const std::string& prog) {
@@ -105,9 +111,13 @@ void ArgManager::usage(Args& args, const std::string& prog) {
   printf("\t-m Sniffer mode, 0 for downlink sniffing mode, 1 for uplink sniffing mode\n");
   printf("\t-z API mode, 0 for identity mapping, 1 for IMSI collecting, 2 for UECapability profiling, 3 for all\n");
   printf("\t-d Enable debug mode, print debug message to screen (Defautl disable)\n");
-  printf("\t   --cells \"PCI1:PRB1,PCI2:PRB2,...\"  Multi-cell list (Step 3).\n");
-  printf("\t                                    All cells share -f (EARFCN); may differ in PRB.\n");
-  printf("\t                                    Empty => legacy single-cell path.\n");
+  printf("\t   --cells \"DL_EARFCN1:PCI1,DL_EARFCN2:PCI2,...\"  Multi-cell list.\n");
+  printf("\t                                    PRB is auto-detected from each cell's MIB.\n");
+  printf("\t                                    Optional 3rd field forces PRB: DL_EARFCN:PCI:PRB (0 = auto).\n");
+  printf("\t   --force                            Proceed even if feasibility reports WARN.\n");
+  printf("\t   --guard-hz <hz>                    Transition-band guard for capture plan (default 200000).\n");
+  printf("\t   --mcc <mcc>                        Only sniff cells with this MCC (0 = no filter).\n");
+  printf("\t   --mnc <mnc>                        Only sniff cells with this MNC (0 = no filter).\n");
 }
 
 void ArgManager::parseArgs(Args& args, int argc, char **argv) {
@@ -115,8 +125,13 @@ void ArgManager::parseArgs(Args& args, int argc, char **argv) {
   defaultArgs(args);
 
   // Step 3: long-option support for --cells.
+  // Step 3b: also --force and --guard-hz.
   static struct option long_opts[] = {
-    {"cells", required_argument, nullptr, 1000},
+    {"cells",     required_argument, nullptr, 1000},
+    {"force",     no_argument,       nullptr, 1001},
+    {"guard-hz",  required_argument, nullptr, 1002},
+    {"mcc",       required_argument, nullptr, 1003},
+    {"mnc",       required_argument, nullptr, 1004},
     {nullptr, 0, nullptr, 0}
   };
   int long_index = 0;
@@ -230,23 +245,38 @@ void ArgManager::parseArgs(Args& args, int argc, char **argv) {
         args.api_mode = static_cast<uint32_t>(strtoul(argv[optind], nullptr, 0));
         break;
       case 1000: {
-        // --cells "PCI1:PRB1,PCI2:PRB2,..."
+        // --cells "DL_EARFCN1:PCI1,DL_EARFCN2:PCI2,..."        (PRB auto-detected from MIB)
+        // --cells "DL_EARFCN1:PCI1:PRB1,..."                   (PRB given; 0 = auto)
+        // Forms can be mixed per cell.
         const char* s = optarg;
         while (*s) {
           char* endptr = nullptr;
-          unsigned long pci = strtoul(s, &endptr, 0);
+          unsigned long v1 = strtoul(s, &endptr, 0);
           if (endptr == s || *endptr != ':') {
-            fprintf(stderr, "Bad --cells format near '%s' (expect PCI:PRB)\n", s);
+            fprintf(stderr, "Bad --cells format near '%s' (expect DL_EARFCN:PCI[:PRB])\n", s);
             exit(-1);
           }
           s = endptr + 1;
-          unsigned long prb = strtoul(s, &endptr, 0);
+          unsigned long v2 = strtoul(s, &endptr, 0);
           if (endptr == s) {
-            fprintf(stderr, "Bad --cells PRB near '%s'\n", s);
+            fprintf(stderr, "Bad --cells PCI near '%s'\n", s);
             exit(-1);
           }
-          CellCfg c{static_cast<uint32_t>(pci), static_cast<uint32_t>(prb)};
+          CellCfg c{};
+          c.dl_earfcn = static_cast<uint32_t>(v1);
+          c.pci       = static_cast<uint32_t>(v2);
+          c.nof_prb   = 0;  // 0 = auto-detect
+          if (*endptr == ':') {
+            s = endptr + 1;
+            unsigned long v3 = strtoul(s, &endptr, 0);
+            if (endptr == s) {
+              fprintf(stderr, "Bad --cells PRB near '%s'\n", s);
+              exit(-1);
+            }
+            c.nof_prb = static_cast<uint32_t>(v3);
+          }
           args.cells.push_back(c);
+          args.cells_have_dl_earfcn = true;
           if (*endptr == ',') {
             s = endptr + 1;
           } else if (*endptr == '\0') {
@@ -256,6 +286,27 @@ void ArgManager::parseArgs(Args& args, int argc, char **argv) {
             exit(-1);
           }
         }
+        break;
+      }
+      case 1001: {
+        // --force
+        args.force = true;
+        break;
+      }
+      case 1002: {
+        // --guard-hz <hz>
+        args.guard_hz = strtod(optarg, nullptr);
+        if (args.guard_hz < 0.0) args.guard_hz = 0.0;
+        break;
+      }
+      case 1003: {
+        // --mcc <3-digit MCC>
+        args.filter_mcc = static_cast<uint16_t>(strtoul(optarg, nullptr, 10));
+        break;
+      }
+      case 1004: {
+        // --mnc <2 or 3-digit MNC>
+        args.filter_mnc = static_cast<uint16_t>(strtoul(optarg, nullptr, 10));
         break;
       }
       case 'h':

@@ -7,11 +7,13 @@
 
 /*
  * Step 3 (multi-cell refactor): one entry per cell to be sniffed.
- * All cells share the same EARFCN (-f) but may have different PCI/PRB.
+ * Step 3b (case 3b): each cell may have its own DL EARFCN. If dl_earfcn == 0
+ * the cell inherits the global -f DL EARFCN (legacy same-EARFCN behaviour).
  */
 struct CellCfg {
-  uint32_t pci;     // Physical Cell ID (0..503)
-  uint32_t nof_prb; // 6, 15, 25, 50, 75, 100
+  uint32_t dl_earfcn;  // 0 = use global -f DL EARFCN
+  uint32_t pci;        // Physical Cell ID (0..503)
+  uint32_t nof_prb;    // 6, 15, 25, 50, 75, 100; 0 = auto-detect from MIB
 };
 
 struct Args {
@@ -65,6 +67,16 @@ struct Args {
 
   // Step 3: multi-cell list. Empty => legacy single-cell path.
   std::vector<CellCfg> cells;
+
+  // Step 3b (case 3b): pre-flight / multi-EARFCN options.
+  bool   force        = false;  // --force: proceed on GO_WITH_WARN
+  double guard_hz     = 200e3;  // --guard-hz: transition-band guard
+  bool   cells_have_dl_earfcn = false;  // true if --cells given (DL_EARFCN:PCI[:PRB] form)
+
+  // MCC/MNC filter (optional). If set, only cells matching MCC/MNC are sniffed.
+  // 0 = no filter for that field.
+  uint16_t filter_mcc = 0;  // --mcc <3-digit MCC>
+  uint16_t filter_mnc = 0;  // --mnc <2 or 3-digit MNC>
 };
 
 class ArgManager {

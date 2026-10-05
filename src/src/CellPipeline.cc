@@ -11,6 +11,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <iomanip>
@@ -170,23 +172,38 @@ void CellPipeline::initUeSyncFile() {
   tmp_filename = nullptr;
 }
 
+srsran_cell_t CellPipeline::mibCell() const {
+  // nof_ports = 0 makes PBCH try 1, 2 and 4 ports. A wrong fixed value
+  // (e.g. 2 on a 1-port eNB) makes every PBCH CRC fail.
+  srsran_cell_t c = cell_;
+  c.nof_ports     = 0;
+  return c;
+}
+
 void CellPipeline::initUeMib(cf_t* buffer) {
   if (srsran_ue_mib_init(&ue_mib_, buffer, cell_.nof_prb)) {
     ERROR("Error initaiting UE MIB decoder");
     exit(-1);
   }
-  if (srsran_ue_mib_set_cell(&ue_mib_, cell_)) {
+  if (srsran_ue_mib_set_cell(&ue_mib_, mibCell())) {
     ERROR("Error initaiting UE MIB decoder");
     exit(-1);
   }
 }
 
 void CellPipeline::configureCfo(float search_cell_cfo) {
-  // Disable CP based CFO estimation during find
-  ue_sync_.cfo_current_value       = search_cell_cfo / 15000;
-  ue_sync_.cfo_is_copied           = true;
-  ue_sync_.cfo_correct_enable_find = true;
-  srsran_sync_set_cfo_cp_enable(&ue_sync_.sfind, false, 0);
+  if (has_initial_cfo_) {
+    // CFO known from cell search: apply it and disable CP based CFO
+    // estimation during find.
+    ue_sync_.cfo_current_value       = search_cell_cfo / 15000;
+    ue_sync_.cfo_is_copied           = true;
+    ue_sync_.cfo_correct_enable_find = true;
+    srsran_sync_set_cfo_cp_enable(&ue_sync_.sfind, false, 0);
+  }
+  // Otherwise keep srsRAN's defaults: sfind estimates CFO (CP + PSS) and
+  // hands it to track on lock. Forcing cfo_is_copied with 0 Hz here leaves
+  // multi-kHz offsets (e.g. B210 eNB without GPSDO) uncorrected and the
+  // MIB may never decode.
   ue_sync_.cfo_correct_enable_track = !args_.disable_cfo;
   srsran_pbch_decode_reset(&ue_mib_.pbch);
 }
@@ -269,10 +286,9 @@ bool CellPipeline::run() {
   initUeMib(cur_buffer[0]);
 
   // ---- 4. CFO + PDSCH config ----
-  // search_cell_cfo is unknown here; pass 0 (legacy code only used it
-  // when cell search was enabled, and even then the value was applied
-  // identically — see configureCfo).
-  configureCfo(0.0f);
+  // initial_cfo_hz_ comes from the orchestrator's cell search
+  // (setInitialCfo), 0 if the cell was not searched.
+  configureCfo(initial_cfo_hz_);
   configurePdsch();
 
   // ---- 5. main loop ----
@@ -281,6 +297,8 @@ bool CellPipeline::run() {
   uint32_t total_sf = 0;
   uint32_t skip_last_1s = 0;
   uint16_t nof_lost_sync = 0;
+  uint32_t find_fail_cnt = 0;  // consecutive PSS search failures
+  uint32_t cfo_clamp_cnt = 0;  // times the tracked CFO was pulled back
   int mcs_tracking_timer = 0;
   int update_rnti_timer = 0;
   uint64_t sf_cnt = 0;
@@ -295,6 +313,22 @@ bool CellPipeline::run() {
     set_srsran_verbose_level(args_.verbose);
     ret = srsran_ue_sync_zerocopy(&ue_sync_, cur_worker->getBuffers(),
                                   max_num_samples);
+    // Keep the tracked CFO within +-kMaxCfoDevHz of the cell-search value.
+    // The oscillators do not drift that fast; larger excursions come from
+    // bad PSS estimates (e.g. sample gaps) and, once integrated, make the
+    // PSS search fail for good.
+    if (has_initial_cfo_) {
+      const float cfo = srsran_ue_sync_get_cfo(&ue_sync_);
+      const float dev = cfo - initial_cfo_hz_;
+      if (std::fabs(dev) > kMaxCfoDevHz) {
+        const float clamped = initial_cfo_hz_ + (dev > 0 ? kMaxCfoDevHz : -kMaxCfoDevHz);
+        ue_sync_.cfo_current_value = clamped / 15000;
+        if ((cfo_clamp_cnt++ % 100) == 0) {
+          cout << "[PCI " << cell_.id << "] CFO " << cfo << " Hz out of range, clamped to "
+               << clamped << " Hz (" << cfo_clamp_cnt << " clamps)" << endl;
+        }
+      }
+    }
     if (ret < 0) {
       if (args_.input_file_name != "") {
         std::cout << "Finish reading from file" << std::endl;
@@ -303,13 +337,19 @@ bool CellPipeline::run() {
     }
 
     if (ret == 1) {
+      if (find_fail_cnt) {
+        cout << "[PCI " << cell_.id << "] Sync found after " << find_fail_cnt
+             << " tries, CFO " << srsran_ue_sync_get_cfo(&ue_sync_) << " Hz" << endl;
+        find_fail_cnt = 0;
+      }
       uint32_t sf_idx = srsran_ue_sync_get_sfidx(&ue_sync_);
       switch (state_) {
         case DECODE_MIB:
           if (sf_idx == 0) {
             uint8_t bch_payload[SRSRAN_BCH_PAYLOAD_LEN];
             int     sfn_offset;
-            n = srsran_ue_mib_decode(&ue_mib_, bch_payload, NULL, &sfn_offset);
+            uint32_t nof_tx_ports = 0;
+            n = srsran_ue_mib_decode(&ue_mib_, bch_payload, &nof_tx_ports, &sfn_offset);
             if (n < 0) {
               ERROR("Error decoding UE MIB");
               exit(-1);
@@ -325,6 +365,23 @@ bool CellPipeline::run() {
                 if (unpacked.nof_prb != cell_.nof_prb) {
                   printf("MIB reports PRB=%u but configured PRB=%u — keeping configured value\n",
                          unpacked.nof_prb, cell_.nof_prb);
+                }
+                // PDCCH/PDSCH need the eNB's real port count and PHICH
+                // config (they set the CRS layout and the PDCCH REG map).
+                // PRB stays as configured (the sample path is built on it).
+                if (nof_tx_ports >= 1 &&
+                    (nof_tx_ports != cell_.nof_ports ||
+                     unpacked.phich_length != cell_.phich_length ||
+                     unpacked.phich_resources != cell_.phich_resources)) {
+                  printf("MIB: ports=%u phich_length=%d phich_resources=%d (configured %u/%d/%d) — updating\n",
+                         nof_tx_ports, unpacked.phich_length, unpacked.phich_resources,
+                         cell_.nof_ports, cell_.phich_length, cell_.phich_resources);
+                  cell_.nof_ports       = nof_tx_ports;
+                  cell_.phich_length    = unpacked.phich_length;
+                  cell_.phich_resources = unpacked.phich_resources;
+                  if (!phy_->setCell(cell_)) {
+                    ERROR("Error updating cell on workers");
+                  }
                 }
                 srsran_cell_fprint(stdout, &cell_, sfn);
                 printf("Decoded MIB. SFN: %d, offset: %d\n", sfn, sfn_offset);
@@ -376,11 +433,39 @@ bool CellPipeline::run() {
       if (sfn == 1024) sfn = 0;
       total_sf++;
 
+      // MCC/MNC filter (--mcc / --mnc): once SIB1 is decoded, stop this
+      // cell if its first PLMN does not match. 0 = no filter for that field.
+      if (!plmn_checked_ && (args_.filter_mcc != 0 || args_.filter_mnc != 0)) {
+        uint16_t mcc, mnc;
+        if (phy_->getCommon().getSib1Plmn(mcc, mnc)) {
+          plmn_checked_ = true;
+          const bool mcc_ok = (args_.filter_mcc == 0 || args_.filter_mcc == mcc);
+          const bool mnc_ok = (args_.filter_mnc == 0 || args_.filter_mnc == mnc);
+          if (mcc_ok && mnc_ok) {
+            printf("[PCI %u] PLMN %03u-%02u matches filter, continue sniffing\n",
+                   cell_.id, mcc, mnc);
+          } else {
+            printf("[PCI %u] PLMN %03u-%02u does not match filter %03u-%02u, stopping this cell\n",
+                   cell_.id, mcc, mnc, args_.filter_mcc, args_.filter_mnc);
+            stop();
+            break;
+          }
+        } else if (total_sf == 10000) {
+          printf("[PCI %u] WARNING: SIB1 not decoded after 10 s; MCC/MNC filter not applied yet\n",
+                 cell_.id);
+        }
+      }
+
       if ((total_sf % 1000) == 0 && (api_mode_ == -1)) {
         auto now = std::chrono::system_clock::now();
         std::time_t cur_time = std::chrono::system_clock::to_time_t(now);
-        std::string str_cur_time(std::ctime(&cur_time));
-        std::string cur_time_second = str_cur_time.substr(11, 8);
+        // localtime_r/strftime: std::ctime() returns a shared static buffer,
+        // and with one pipeline thread per cell two threads raced on it
+        // (empty string -> substr() threw std::out_of_range -> abort).
+        std::tm tm_now{};
+        localtime_r(&cur_time, &tm_now);
+        char cur_time_second[16];
+        std::strftime(cur_time_second, sizeof(cur_time_second), "%H:%M:%S", &tm_now);
         std::cout << "[" << cur_time_second << "] Processed "
                   << (1000 - skip_last_1s) << "/1000 subframes" << "\n";
         mcs_tracking_timer++;
@@ -430,7 +515,7 @@ bool CellPipeline::run() {
           ERROR("Error initaiting UE MIB decoder");
           exit(-1);
         }
-        if (srsran_ue_mib_set_cell(&ue_mib_, cell_)) {
+        if (srsran_ue_mib_set_cell(&ue_mib_, mibCell())) {
           ERROR("Error initaiting UE MIB decoder");
           exit(-1);
         }
@@ -438,9 +523,28 @@ bool CellPipeline::run() {
         nof_lost_sync = 0;
       }
       nof_lost_sync++;
-      cout << "Finding PSS... Peak: " << srsran_sync_get_peak_value(&ue_sync_.sfind)
-           << ", FrameCnt: " << ue_sync_.frame_total_cnt
-           << " State: " << ue_sync_.state << endl;
+      find_fail_cnt++;
+      // Rate-limited: this branch runs several hundred times per second
+      // while searching, which used to grow the log by GBs.
+      if (find_fail_cnt == 1 || (find_fail_cnt % 200) == 0) {
+        cout << "[PCI " << cell_.id << "] Finding PSS... Peak: "
+             << srsran_sync_get_peak_value(&ue_sync_.sfind)
+             << ", CFO: " << srsran_ue_sync_get_cfo(&ue_sync_) << " Hz"
+             << ", FrameCnt: " << ue_sync_.frame_total_cnt
+             << " State: " << ue_sync_.state
+             << " (" << find_fail_cnt << " tries)" << endl;
+      }
+      // With a copied CFO, find never re-estimates it. If the tracked CFO
+      // drifted away, PSS search fails forever; fall back to the value from
+      // the cell search (or 0) after a sustained loss.
+      if ((find_fail_cnt % 2000) == 0) {
+        cout << "[PCI " << cell_.id << "] Sync lost for " << find_fail_cnt
+             << " tries, CFO " << srsran_ue_sync_get_cfo(&ue_sync_)
+             << " Hz -> resetting to " << initial_cfo_hz_ << " Hz" << endl;
+        ue_sync_.cfo_current_value = initial_cfo_hz_ / 15000;
+        srsran_sync_cfo_reset(&ue_sync_.sfind, 0.0f);
+        srsran_sync_cfo_reset(&ue_sync_.strack, 0.0f);
+      }
     }
     sf_cnt++;
   }

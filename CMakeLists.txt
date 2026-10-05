@@ -173,23 +173,38 @@ if(SRSRAN_FOUND AND NOT FORCE_SUBPROJECT_SRSRAN)
   link_directories(${SRSLTE_LIBRARY_DIRS})
 else(SRSRAN_FOUND AND NOT FORCE_SUBPROJECT_SRSRAN)
 
-  message("Download SRSRAN as a subproject and build it.")
+  # srsRAN is pinned to one commit so every build (host or Docker) uses the
+  # same sources. SRSRAN_SOURCE_DIR points at an existing checkout (e.g. a
+  # cached Docker layer) and skips the download entirely.
+  set(SRSRAN_GIT_REPOSITORY "https://github.com/ShaoPaoLao/srsRAN2.git" CACHE STRING "srsRAN git repository")
+  set(SRSRAN_GIT_TAG "0acc79d3fe5b153a18b62e8ef5af1a0fb2327a18" CACHE STRING "srsRAN commit to build")
+  set(SRSRAN_SOURCE_DIR "" CACHE PATH "Existing srsRAN checkout; empty = download SRSRAN_GIT_TAG")
 
-  # Download and unpack srsRAN at configure time
-  configure_file(external/cmake/srsRAN.CMakeLists.txt.in srsRAN-download/CMakeLists.txt)
-  execute_process(COMMAND "${CMAKE_COMMAND}" -G "${CMAKE_GENERATOR}" .
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/srsRAN-download" )
-  execute_process(COMMAND "${CMAKE_COMMAND}" --build .
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/srsRAN-download" )
+  if(SRSRAN_SOURCE_DIR)
+    if(NOT EXISTS "${SRSRAN_SOURCE_DIR}/CMakeLists.txt")
+      message(FATAL_ERROR "SRSRAN_SOURCE_DIR=${SRSRAN_SOURCE_DIR} is not a srsRAN source tree")
+    endif()
+    message("Using srsRAN sources from ${SRSRAN_SOURCE_DIR}")
+    set(SRSRAN_SRC_DIR "${SRSRAN_SOURCE_DIR}")
+  else()
+    message("Download SRSRAN ${SRSRAN_GIT_TAG} as a subproject and build it.")
+    # Download and unpack srsRAN at configure time
+    configure_file(external/cmake/srsRAN.CMakeLists.txt.in srsRAN-download/CMakeLists.txt)
+    execute_process(COMMAND "${CMAKE_COMMAND}" -G "${CMAKE_GENERATOR}" .
+      WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/srsRAN-download" )
+    execute_process(COMMAND "${CMAKE_COMMAND}" --build .
+      WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/srsRAN-download" )
+    set(SRSRAN_SRC_DIR "${CMAKE_BINARY_DIR}/srsRAN-src")
+  endif()
 
   include_directories("${CMAKE_BINARY_DIR}/srsRAN-build/lib/include")
-  include_directories("${CMAKE_BINARY_DIR}/srsRAN-src/lib/include")
-  include_directories("${CMAKE_BINARY_DIR}/srsRAN-src/")
+  include_directories("${SRSRAN_SRC_DIR}/lib/include")
+  include_directories("${SRSRAN_SRC_DIR}/")
   # let the compiler find included files from subdirectories
   include_directories(".")
 
   # Add srsRAN directly to our build.
-  add_subdirectory("${CMAKE_BINARY_DIR}/srsRAN-src"
+  add_subdirectory("${SRSRAN_SRC_DIR}"
     "${CMAKE_BINARY_DIR}/srsRAN-build")
 
   set(SRSRAN_LIBRARY_RF srsran_rf)

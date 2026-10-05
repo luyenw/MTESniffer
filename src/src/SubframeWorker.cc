@@ -99,6 +99,15 @@ SubframeWorker::~SubframeWorker()
 
 bool SubframeWorker::setCell(srsran_cell_t cell)
 {
+  // srsran_ue_dl_set_cell() only re-initialises when the PCI changes, so a
+  // port-count or PHICH update (learned from the MIB) would be ignored.
+  // Invalidate the cached PCI to force a full re-init in that case.
+  const srsran_cell_t& cur = falcon_ue_dl.q->cell;
+  if (cur.nof_prb != 0 && (cur.nof_ports != cell.nof_ports || cur.phich_length != cell.phich_length ||
+                           cur.phich_resources != cell.phich_resources))
+  {
+    falcon_ue_dl.q->cell.id = SRSRAN_NUM_PCI;
+  }
   if (srsran_ue_dl_set_cell(falcon_ue_dl.q, cell))
   {
     return false;
@@ -231,6 +240,16 @@ void SubframeWorker::run_dl_mode(SubframeInfo &subframeInfo)
                                    sf_idx);
   /*Start decoding PDSCH*/
   pdschdecoder->decode_dl_mode();
+  reportSib1Plmn();
+}
+
+void SubframeWorker::reportSib1Plmn()
+{
+  uint16_t mcc, mnc;
+  if (pdschdecoder->getSib1MccMnc(mcc, mnc))
+  {
+    common.reportSib1Plmn(mcc, mnc);
+  }
 }
 
 void SubframeWorker::run_ul_mode(SubframeInfo &subframeInfo, uint32_t tti)
@@ -245,6 +264,7 @@ void SubframeWorker::run_ul_mode(SubframeInfo &subframeInfo, uint32_t tti)
                                      sfn,
                                      sf_idx);
     sib_ret = pdschdecoder->decode_SIB();
+    reportSib1Plmn();
     if (sib_ret == DL_SNIFFER_SIB2_SUCCESS)
     {
       ulsche->set_SIB2(pdschdecoder->getSIB2());
@@ -411,7 +431,9 @@ void SubframeWorker::print_nof_DCI(SubframeInfo &subframeInfo, uint32_t tti)
   // Convert time to string in desired format
   auto time = std::chrono::system_clock::to_time_t(now);
   std::stringstream ss;
-  ss << std::put_time(std::localtime(&time), "%H:%M:%S.")
+  std::tm tm_now{};
+  localtime_r(&time, &tm_now);  // std::localtime() is not thread-safe
+  ss << std::put_time(&tm_now, "%H:%M:%S.")
      << std::setw(6) << std::setfill('0') << micros.count() % 1000000;
   std::string time_str = ss.str();
 

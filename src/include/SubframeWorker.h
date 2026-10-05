@@ -43,6 +43,7 @@ public:
   void                  set_pdsch_uecfg(srsran_pdsch_cfg_t* pdsch_cfg);
   void                  set_ue_dl_uecfg(srsran_ue_dl_cfg_t* ue_dl_cfg);
   void                  run_dl_mode(SubframeInfo &subframeInfo);
+  void                  reportSib1Plmn();
   void                  run_ul_mode(SubframeInfo &subframeInfo, uint32_t tti);
   void                  set_ul_harq(UL_HARQ *ul_harq_){ ul_harq = ul_harq_;}
   void                  print_nof_DCI(SubframeInfo &subframeInfo, uint32_t tti);

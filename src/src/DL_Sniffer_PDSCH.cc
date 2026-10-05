@@ -70,7 +70,9 @@ int PDSCH_Decoder::init_pdsch_decoder(falcon_ue_dl_t *_falcon_ue_dl,
 									  srsran_ue_dl_cfg_t *_ue_dl_cfg,
 									  std::vector<DL_Sniffer_DCI_DL> *_ran_dl_collection,
 									  uint32_t _sfn,
-									  uint32_t _sf_idx)
+									  uint32_t _sf_idx,
+									  uint16_t _filter_mcc,
+									  uint16_t _filter_mnc)
 {
 	falcon_ue_dl = _falcon_ue_dl;
 	dl_sf = _dl_sf;
@@ -78,6 +80,8 @@ int PDSCH_Decoder::init_pdsch_decoder(falcon_ue_dl_t *_falcon_ue_dl,
 	ran_dl_collection = _ran_dl_collection;
 	sfn = _sfn;
 	sf_idx = _sf_idx;
+	filter_mcc_ = _filter_mcc;
+	filter_mnc_ = _filter_mnc;
 	return SRSRAN_SUCCESS;
 }
 
@@ -456,6 +460,31 @@ int PDSCH_Decoder::decode_ul_mode(uint32_t rnti, std::vector<DL_Sniffer_rar_resu
 	return SRSRAN_SUCCESS;
 }
 
+void PDSCH_Decoder::parse_sib1_plmn(const asn1::rrc::sib_type1_s &sib1)
+{
+	// Extract MCC/MNC from SIB1's first PLMN entry.
+	const auto &plmn_list = sib1.cell_access_related_info.plmn_id_list;
+	if (plmn_list.size() == 0)
+	{
+		return;
+	}
+	const auto &plmn = plmn_list[0].plmn_id;
+	if (plmn.mcc_present && plmn.mcc.size() == 3)
+	{
+		sib1_mcc = plmn.mcc[0] * 100 + plmn.mcc[1] * 10 + plmn.mcc[2];
+	}
+	if (plmn.mnc.size() == 2)
+	{
+		sib1_mnc = plmn.mnc[0] * 10 + plmn.mnc[1];
+	}
+	else if (plmn.mnc.size() == 3)
+	{
+		sib1_mnc = plmn.mnc[0] * 100 + plmn.mnc[1] * 10 + plmn.mnc[2];
+	}
+	sib1_decoded = true;
+	printf("[SIB1] MCC=%03u MNC=%02u\n", sib1_mcc, sib1_mnc);
+}
+
 int PDSCH_Decoder::decode_SIB() // change to decode SIB
 {
 	uint32_t tti = sfn * 10 + sf_idx;
@@ -537,7 +566,7 @@ int PDSCH_Decoder::decode_SIB() // change to decode SIB
 						{
 							if (dlsch_msg.msg.c1().type() == asn1::rrc::bcch_dl_sch_msg_type_c::c1_c_::types::sib_type1)
 							{
-								// do nothing
+								parse_sib1_plmn(dlsch_msg.msg.c1().sib_type1());
 							}
 							else
 							{
@@ -719,7 +748,12 @@ int PDSCH_Decoder::run_rar_decode(srsran_dci_format_t cur_format,
 
 				/*Unpack PDSCH msg to receive rar*/
 				std::time_t epoch = std::time(nullptr);
-				char *time = std::asctime(std::localtime(&epoch));
+				// asctime_r/localtime_r: the non-_r versions share a static
+				// buffer across worker threads.
+				std::tm tm_now{};
+				localtime_r(&epoch, &tm_now);
+				char time[32];
+				asctime_r(&tm_now, time);
 				std::string time_str;
 				for (int idx = 11; idx < 19; idx++)
 				{
@@ -1034,6 +1068,18 @@ int PDSCH_Decoder::decode_dl_mode()
 						if (pdsch_res[tb].crc && result_length > 0)
 						{
 							write_pcap(RNTI_name, pdsch_res[tb].payload, result_length, cur_rnti, tti, 0);
+							if (RNTI_name == "SI_RNTI" && !sib1_decoded)
+							{
+								/*Unpack BCCH-DL-SCH to get MCC/MNC from SIB1*/
+								asn1::rrc::bcch_dl_sch_msg_s dlsch_msg;
+								asn1::cbit_ref dlsch_bref(pdsch_res[tb].payload, result_length);
+								if (dlsch_msg.unpack(dlsch_bref) == asn1::SRSASN_SUCCESS &&
+									dlsch_msg.msg.type() == asn1::rrc::bcch_dl_sch_msg_type_c::types::c1 &&
+									dlsch_msg.msg.c1().type() == asn1::rrc::bcch_dl_sch_msg_type_c::c1_c_::types::sib_type1)
+								{
+									parse_sib1_plmn(dlsch_msg.msg.c1().sib_type1());
+								}
+							}
 							if (RNTI_name == "RA_RNTI")
 							{
 								unpack_rar_response_dl_mode(pdsch_res[tb].payload, result_length);
